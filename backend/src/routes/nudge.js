@@ -1,14 +1,11 @@
 /**
- * nudge.js — Rule engine + SSE nudge delivery
- * Drop this file in routes/nudge.js
- * Mount in index.js: app.use('/', require('./routes/nudge'));
+ * routes/nudge.js — LMS-aware rule engine + SSE nudge delivery
  */
 
 const router = require('express').Router();
+const { v4: uuidv4 } = require('uuid');
 
-// ── In-memory session store ───────────────────────────────────────────────────
-// V1: plain Map. Replace with Redis later.
-// key: session_id → session state object
+// ── Session store ─────────────────────────────────────────────────────────────
 const sessionStore = new Map();
 
 function getSession(sid) {
@@ -18,16 +15,17 @@ function getSession(sid) {
       created_at: Date.now(),
       last_active: Date.now(),
       page_count: 0,
-      page_visits: {},        // path → count
-      rage_clicks: {},        // xpath → [timestamps]
+      page_visits: {},
       dead_clicks: 0,
+      rage_clicks: {},
       stuck_count: 0,
       form_abandoned: false,
-      nudges_shown: [],       // template_ids shown this session
+      nudges_shown: [],
       nudge_last_ts: 0,
-      nudge_page_count: {},   // path → nudge count
+      nudge_page_count: {},
       is_typing: false,
-      nudge_outcomes: [],
+      time_on_page: {},      // path → entry timestamp
+      scroll_depth: {},      // path → max depth seen
     });
   }
   const s = sessionStore.get(sid);
@@ -37,14 +35,13 @@ function getSession(sid) {
 
 // Cleanup stale sessions every 10min
 setInterval(() => {
-  const cutoff = Date.now() - 30 * 60 * 1000; // 30min idle
+  const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [sid, s] of sessionStore.entries()) {
     if (s.last_active < cutoff) sessionStore.delete(sid);
   }
 }, 10 * 60 * 1000);
 
-// ── SSE connection registry ───────────────────────────────────────────────────
-// key: session_id → { res, tab_id, site_id }
+// ── SSE registry ──────────────────────────────────────────────────────────────
 const sseConnections = new Map();
 
 function sendNudge(sid, nudgePayload) {
@@ -60,190 +57,310 @@ function sendNudge(sid, nudgePayload) {
 }
 
 // ── Spam gate ─────────────────────────────────────────────────────────────────
-const DEMO_MODE = process.env.DEMO_MODE === 'true'; // set in .env for demo
-
 function spamGate(session, templateId, path) {
   const now = Date.now();
-
-  // Already shown this template this session
   if (session.nudges_shown.includes(templateId)) return false;
-
-  // Cooldown: 5s in demo, 15s in prod
-  const cooldown = DEMO_MODE ? 5000 : 15000;
-  if (now - session.nudge_last_ts < cooldown) return false;
-
-  // Max nudges per page: 3 in demo, 1 in prod
-  const pageNudges = session.nudge_page_count[path] || 0;
-  if (pageNudges >= (DEMO_MODE ? 3 : 1)) return false;
-
-  // User is typing
+  if (now - session.nudge_last_ts < 8000) return false;          // 8s cooldown for demo
+  if ((session.nudge_page_count[path] || 0) >= 1) return false;
   if (session.is_typing) return false;
-
   return true;
 }
 
-function recordNudgeSent(session, templateId, path, nudgeId) {
+function recordNudgeSent(session, templateId, path) {
   session.nudges_shown.push(templateId);
   session.nudge_last_ts = Date.now();
   session.nudge_page_count[path] = (session.nudge_page_count[path] || 0) + 1;
 }
 
-// ── Rules ─────────────────────────────────────────────────────────────────────
-// NOTE: Lendly is a SPA — all screens are at /lms, path never changes.
-// Rules use generic messages that work on any screen.
-const RULES = [
+// ── LMS page matcher ──────────────────────────────────────────────────────────
+function lmsPage(url) {
+  try {
+    const p = new URL(url).pathname.replace(/^\//, '').replace(/\.html$/, '').split('/').pop() || 'index';
+    return p;
+  } catch { return ''; }
+}
+
+// ── LMS-specific rules ────────────────────────────────────────────────────────
+// Each rule: { id, trigger, match(page, event, session) → bool, nudge(page, event) → {type,message,icon} }
+
+const LMS_RULES = [
+
+  // ── login.html ──────────────────────────────────────────────────────────────
   {
-    id: 'rule_rage_click',
-    trigger: 'rage_click',
-    evaluate(session, event) {
-      const xpath = event.data?.xpath || 'unknown';
-      if (!session.rage_clicks[xpath]) session.rage_clicks[xpath] = [];
-      const now = Date.now();
-      session.rage_clicks[xpath] = session.rage_clicks[xpath].filter(t => now - t < 2000);
-      session.rage_clicks[xpath].push(now);
-      return session.rage_clicks[xpath].length >= 1;
-    },
-    nudge(event) {
-      return {
-        type: 'tooltip',
-        message: "Having trouble? Double-check your input and try again.",
-        priority: 'high',
-      };
-    },
-  },
-  {
-    id: 'rule_dead_click',
-    trigger: 'dead_click',
-    evaluate(session, event) {
-      session.dead_clicks = (session.dead_clicks || 0) + 1;
-      return session.dead_clicks >= 2;
-    },
-    nudge(event) {
-      return {
-        type: 'tooltip',
-        message: "That area isn't clickable. Use the button below to continue.",
-        priority: 'medium',
-      };
-    },
-  },
-  {
-    id: 'rule_stuck',
-    trigger: 'stuck',
-    evaluate(session, event) {
-      session.stuck_count = (session.stuck_count || 0) + 1;
-      return true;
-    },
-    nudge(event) {
-      return {
-        type: 'banner',
-        message: "Need help? Most users complete this step in under 2 minutes.",
-        priority: 'medium',
-      };
-    },
-  },
-  {
-    id: 'rule_form_abandon',
-    trigger: 'form_abandon',
-    evaluate(session, event) {
-      if (session.form_abandoned) return false;
-      session.form_abandoned = true;
-      return true;
-    },
-    nudge(event) {
-      return {
-        type: 'banner',
-        message: "Almost done! Your progress is saved — you can continue where you left off.",
-        priority: 'low',
-      };
-    },
-  },
-  {
-    id: 'rule_repeated_page',
+    id: 'lms_login_arrive',
     trigger: 'pageview',
-    evaluate(session, event) {
-      try {
-        const path = new URL(event.url || 'http://x').pathname;
-        session.page_visits[path] = (session.page_visits[path] || 0) + 1;
-        return session.page_visits[path] >= 3;
-      } catch { return false; }
+    match: (page) => page === 'login',
+    nudge: () => ({ type: 'banner', icon: '💡', message: 'Enter any 10-digit number. OTP is 123456' }),
+    delay: 2500,
+  },
+  {
+    id: 'lms_login_otp_hesitation',
+    trigger: 'hesitation',
+    match: (page, evt) => page === 'login' && (evt.data?.id?.startsWith('o') || evt.data?.tag === 'INPUT'),
+    nudge: () => ({ type: 'tooltip', icon: '⌨️', message: 'Just type 123456 — one digit per box' }),
+    delay: 0,
+  },
+  {
+    id: 'lms_login_rage',
+    trigger: 'rage_click',
+    match: (page) => page === 'login',
+    nudge: () => ({ type: 'tooltip', icon: '👆', message: 'Tap Send OTP first, then enter 123456' }),
+    delay: 0,
+  },
+
+  // ── profile.html ─────────────────────────────────────────────────────────────
+  {
+    id: 'lms_profile_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'profile',
+    nudge: () => ({ type: 'banner', icon: '✅', message: 'Fields are pre-filled — just tap Continue' }),
+    delay: 3000,
+  },
+
+  // ── loan-offer.html ──────────────────────────────────────────────────────────
+  {
+    id: 'lms_offer_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'loan-offer',
+    nudge: () => ({ type: 'tooltip', icon: '💰', message: 'Drag the slider to pick your amount' }),
+    delay: 2000,
+  },
+  {
+    id: 'lms_offer_dead_click',
+    trigger: 'dead_click',
+    match: (page) => page === 'loan-offer',
+    nudge: () => ({ type: 'tooltip', icon: '📊', message: 'Rate is fixed. Use slider to adjust EMI' }),
+    delay: 0,
+  },
+
+  // ── plan-select.html ─────────────────────────────────────────────────────────
+  {
+    id: 'lms_plan_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'plan-select',
+    nudge: () => ({ type: 'banner', icon: '📅', message: '12 months gives the best EMI balance' }),
+    delay: 2500,
+  },
+  {
+    id: 'lms_plan_scroll',
+    trigger: 'scroll',
+    match: (page, evt) => page === 'plan-select' && (evt.data?.depth || 0) >= 75,
+    nudge: () => ({ type: 'inline', icon: '👇', message: 'Loan summary auto-updates as you pick' }),
+    delay: 0,
+  },
+
+  // ── kyc-upload.html ──────────────────────────────────────────────────────────
+  {
+    id: 'lms_kyc_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'kyc-upload',
+    nudge: () => ({ type: 'banner', icon: '📎', message: 'Tap any box — no real file needed for demo' }),
+    delay: 3000,
+  },
+  {
+    id: 'lms_kyc_stuck',
+    trigger: 'hesitation',
+    match: (page, evt, session) => {
+      if (page !== 'kyc-upload') return false;
+      const entered = session.time_on_page[page] || Date.now();
+      return Date.now() - entered > 6000;
     },
-    nudge(event) {
-      return {
-        type: 'banner',
-        message: "Looks like you came back! Need help? Our support is available 9am–6pm.",
-        priority: 'low',
-      };
-    },
+    nudge: () => ({ type: 'tooltip', icon: '🖼️', message: 'Tap any upload zone → pick any image' }),
+    delay: 0,
+  },
+
+  // ── credit-check.html ────────────────────────────────────────────────────────
+  {
+    id: 'lms_credit_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'credit-check',
+    nudge: () => ({ type: 'inline', icon: '🔍', message: 'Watch score animate to 742 — auto-approved!' }),
+    delay: 800,
+  },
+
+  // ── approved.html ────────────────────────────────────────────────────────────
+  {
+    id: 'lms_approved_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'approved',
+    nudge: () => ({ type: 'banner', icon: '🎉', message: '742 CIBIL — excellent score. Tap Accept!' }),
+    delay: 2000,
+  },
+
+  // ── final-terms.html ─────────────────────────────────────────────────────────
+  {
+    id: 'lms_terms_scroll',
+    trigger: 'scroll',
+    match: (page, evt) => page === 'final-terms' && (evt.data?.depth || 0) >= 80,
+    nudge: () => ({ type: 'tooltip', icon: '☑️', message: 'Check the box below — button unlocks' }),
+    delay: 800,
+  },
+  {
+    id: 'lms_terms_hesitation',
+    trigger: 'hesitation',
+    match: (page) => page === 'final-terms',
+    nudge: () => ({ type: 'tooltip', icon: '👆', message: 'Tap the checkbox to proceed to e-sign' }),
+    delay: 0,
+  },
+
+  // ── esign.html ────────────────────────────────────────────────────────────────
+  {
+    id: 'lms_esign_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'esign',
+    nudge: () => ({ type: 'inline', icon: '✍️', message: 'Draw any scribble — even a single line works' }),
+    delay: 2500,
+  },
+  {
+    id: 'lms_esign_dead_click',
+    trigger: 'dead_click',
+    match: (page, evt) => page === 'esign' && evt.data?.tag === 'canvas',
+    nudge: () => ({ type: 'tooltip', icon: '🖊️', message: 'Hold & drag on the white box to sign' }),
+    delay: 0,
+  },
+
+  // ── bank-details.html ────────────────────────────────────────────────────────
+  {
+    id: 'lms_bank_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'bank-details',
+    nudge: () => ({ type: 'banner', icon: '🏦', message: 'All fields pre-filled — tap Verify & Continue' }),
+    delay: 2000,
+  },
+
+  // ── transfer.html ─────────────────────────────────────────────────────────────
+  {
+    id: 'lms_transfer_arrive',
+    trigger: 'pageview',
+    match: (page) => page === 'transfer',
+    nudge: () => ({ type: 'inline', icon: '⚡', message: 'Watch all 4 steps complete in ~8 seconds' }),
+    delay: 500,
+  },
+
+  // ── Generic fallbacks (non-LMS or unknown page) ───────────────────────────────
+  {
+    id: 'generic_rage_click',
+    trigger: 'rage_click',
+    match: (page, evt, session) => !page.startsWith('lms_'),
+    nudge: () => ({ type: 'tooltip', icon: '⚠️', message: "This isn't responding — try another option" }),
+    delay: 0,
+  },
+  {
+    id: 'generic_dead_click',
+    trigger: 'dead_click',
+    match: (page, evt, session) => session.dead_clicks >= 3,
+    nudge: () => ({ type: 'tooltip', icon: '🔎', message: "That area isn't clickable — use the buttons" }),
+    delay: 0,
+  },
+  {
+    id: 'generic_form_abandon',
+    trigger: 'form_abandon',
+    match: (page, evt, session) => !session.form_abandoned,
+    nudge: () => ({ type: 'banner', icon: '💾', message: 'Progress saved — come back anytime' }),
+    delay: 0,
   },
 ];
 
 // ── Rule engine ───────────────────────────────────────────────────────────────
-const { v4: uuidv4 } = require('uuid');
-
 const ruleEngine = {
   async evaluate(event) {
     const { type, sid, site_id, url } = event;
     if (!sid) return;
 
     const session = getSession(sid);
+    const page = lmsPage(url || '');
 
-    // Update typing state
-    if (type === 'keydown') { session.is_typing = true; setTimeout(() => { session.is_typing = false; }, 2000); }
-    if (type === 'pageview') session.page_count++;
+    // State bookkeeping
+    if (type === 'keydown') {
+      session.is_typing = true;
+      setTimeout(() => { session.is_typing = false; }, 2000);
+    }
+    if (type === 'pageview') {
+      session.page_count++;
+      session.time_on_page[page] = Date.now();
+    }
+    if (type === 'scroll') {
+      const d = event.data?.depth || 0;
+      if (!session.scroll_depth[page] || d > session.scroll_depth[page]) {
+        session.scroll_depth[page] = d;
+      }
+    }
+    if (type === 'dead_click') session.dead_clicks++;
+    if (type === 'form_abandon') session.form_abandoned = true;
 
-    let path = '/';
-    try { path = new URL(url || 'http://x').pathname; } catch {}
+    const path = `/${page}`;
 
-    for (const rule of RULES) {
+    for (const rule of LMS_RULES) {
       if (rule.trigger !== type) continue;
 
-      let shouldNudge = false;
-      try { shouldNudge = rule.evaluate(session, event); } catch {}
-      if (!shouldNudge) continue;
+      let matched = false;
+      try { matched = rule.match(page, event, session); } catch {}
+      if (!matched) continue;
 
       if (!spamGate(session, rule.id, path)) continue;
 
-      const nudgeBase = rule.nudge(event);
+      const base = rule.nudge(page, event);
       const nudgeId = uuidv4();
       const payload = {
         nudge_id: nudgeId,
         template_id: rule.id,
         site_id,
         sid,
-        ...nudgeBase,
-        expires_ts: Date.now() + 30000, // 30s to render
+        type: base.type,
+        message: base.message,
+        icon: base.icon || '',
+        delay: rule.delay || 0,
+        expires_ts: Date.now() + 30000,
       };
 
-      recordNudgeSent(session, rule.id, path, nudgeId);
+      recordNudgeSent(session, rule.id, path);
 
-      const delivered = sendNudge(sid, payload);
-      console.log(`[NUDGE] ${rule.id} → session ${sid} | delivered: ${delivered}`);
-      break; // only one nudge per event batch
+      // Respect per-rule delay before sending
+      if (rule.delay > 0) {
+        setTimeout(() => {
+          const delivered = sendNudge(sid, payload);
+          console.log(`[NUDGE] ${rule.id} → ${sid} | page:${page} | delivered:${delivered}`);
+        }, rule.delay);
+      } else {
+        const delivered = sendNudge(sid, payload);
+        console.log(`[NUDGE] ${rule.id} → ${sid} | page:${page} | delivered:${delivered}`);
+      }
+
+      break; // one nudge per event
     }
   },
 };
 
-// ── SSE nudge stream endpoint ─────────────────────────────────────────────────
-// GET /nudge-stream?k=API_KEY&sid=SESSION_ID&tab=TAB_ID
+// ── SSE endpoint ──────────────────────────────────────────────────────────────
+// GET /nudge-stream?k=API_KEY&sid=SESSION_ID
 router.get('/nudge-stream', async (req, res) => {
-  const { k: apiKey, sid, tab } = req.query;
-  if (!apiKey || !sid) return res.status(400).end();
+  console.log('[NUDGE-STREAM] Request received:', { apiKey: req.query.k?.slice(0, 10), sid: req.query.sid?.slice(0, 10) });
+  const { k: apiKey, sid } = req.query;
+  if (!apiKey || !sid) {
+    console.log('[NUDGE-STREAM] Missing apiKey or sid');
+    return res.status(400).end();
+  }
 
-  // Validate API key
   const db = require('../db');
-  const { data: site } = await db.supabase.from('sites').select('id').eq('api_key', apiKey).maybeSingle();
-  if (!site) return res.status(401).end();
+  const { data: site } = await db.supabase
+    .from('sites').select('id').eq('api_key', apiKey).maybeSingle();
+  if (!site) {
+    console.log('[NUDGE-STREAM] Invalid API key:', apiKey);
+    return res.status(401).end();
+  }
+  console.log('[NUDGE-STREAM] SSE connection established for site:', site.id);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // nginx: disable buffering
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Register connection
-  sseConnections.set(sid, { res, tab, site_id: site.id });
+  sseConnections.set(sid, { res, site_id: site.id });
 
-  // Heartbeat every 20s to keep connection alive
+  // Send a welcome ping so client knows connection is live
+  res.write(`data: ${JSON.stringify({ type: 'connected', sid })}\n\n`);
+
   const heartbeat = setInterval(() => {
     try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); }
   }, 20000);

@@ -1,6 +1,9 @@
 import React, { useState, createContext, useContext, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate, useParams, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.jsx';
+import { useNudges } from '../hooks/useNudges.jsx';
+import NudgeContainer from '../components/NudgeContainer.jsx';
+import { api } from '../utils/api.js';
 import { BarChart2, Zap, Map, Code, LogOut, ChevronLeft, ChevronRight, Bell, Search, Activity, Layers, GitFork, Navigation, Users, Terminal, TrendingUp, Cookie, Target } from 'lucide-react';
 import logo from "./logo2.svg";
 
@@ -36,6 +39,20 @@ export default function DashboardLayout() {
   const { id } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const [collapsed, setCollapsed] = useState(false);
+  const [site, setSite] = useState(null);
+  
+  // Fetch current site if viewing a site
+  useEffect(() => {
+    if (id) {
+      api.get(`/sites/${id}`)
+        .then(setSite)
+        .catch(err => console.error('Failed to load site:', err));
+    } else {
+      setSite(null);
+    }
+  }, [id]);
+
+  const { nudges, removeNudge } = useNudges(site?.api_key);
 
   const [dateRange, setDateRangeState] = useState(() => parseInt(searchParams.get('range') || '7'));
   const [country, setCountryState] = useState(() => searchParams.get('country') || 'All countries');
@@ -78,6 +95,7 @@ export default function DashboardLayout() {
 
   return (
     <FilterContext.Provider value={filters}>
+      <NudgeContainer nudges={nudges} onRemove={removeNudge} />
       <div className="flex min-h-screen bg-trackflow-bg">
         <aside
           style={{ transition: 'width 0.22s cubic-bezier(.4,0,.2,1)' }}
