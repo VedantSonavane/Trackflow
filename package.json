@@ -1,0 +1,14 @@
+{
+  "name": "trackflow",
+  "version": "1.0.0",
+  "description": "Self-hosted web analytics with script tag generator",
+  "scripts": {
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "dev": "concurrently --names \"backend,frontend\" --prefix-colors \"white,cyan\" \"cd backend && npm run dev\" \"cd frontend && npm run dev\"",
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
