@@ -341,8 +341,9 @@ export default function SiteOverview() {
               <p className="text-sm font-semibold text-red-600 mb-1">Tracking script not detected</p>
               <p className="text-xs text-red-800 mb-2">Add this to your site's &lt;head&gt;:</p>
               <code className="block p-2.5 bg-white border border-red-200 rounded-lg text-[11px] font-mono text-gray-600 overflow-x-auto">
-                &lt;script defer src="{window.location.origin}/track.js?k={site?.api_key}"&gt;&lt;/script&gt;
+                &lt;script defer src="http://localhost:3251/track.js?k={site?.api_key}"&gt;&lt;/script&gt;
               </code>
+              <p className="text-[10px] text-red-700 mt-2 italic">💡 For production: Replace localhost:3251 with your backend URL (e.g., https://api.yourdomain.com)</p>
             </div>
           </div>
         )}

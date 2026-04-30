@@ -110,12 +110,20 @@ router.post('/collect', async (req, res) => {
   const site = await getSite(apiKey);
   if (!site) return res.status(401).json({ error: 'Invalid key' });
 
+  // Domain validation (skip for dev & local files)
   const origin = req.headers.origin || req.headers.referer || '';
-  if (origin && !origin.includes(site.domain) && process.env.NODE_ENV === 'production') {
+  const isLocalFile = origin.startsWith('file://');
+  const isDev = process.env.NODE_ENV !== 'production';
+  if (origin && !isLocalFile && !isDev && !origin.includes(site.domain)) {
+    console.log('[COLLECT] Domain mismatch:', { origin, domain: site.domain });
     return res.status(403).json({ error: 'Domain mismatch' });
+  }
+  if (isDev || isLocalFile) {
+    console.log('[COLLECT] ✅ Skipping domain check (dev mode):', { isDev, isLocalFile, origin, siteId: site.id });
   }
 
   const events = Array.isArray(eventsRaw) ? eventsRaw : [eventsRaw];
+  console.log(`[COLLECT] 📥 Received ${events.length} event(s) from ${site.domain} (${site.name})`);
   const userHash = hashUser(req.ip, ua);
   const { browser, os, device_type } = detectUA(ua);
 
@@ -220,8 +228,9 @@ router.post('/collect', async (req, res) => {
     const seen = new Set();
     const dedupedEvents = eventsToInsert.filter(e => { if (seen.has(e.client_id)) return false; seen.add(e.client_id); return true; });
     if (dedupedEvents.length > 0) {
-      await db.supabase.from('events').upsert(dedupedEvents, { onConflict: 'site_id,client_id', ignoreDuplicates: true });
-    }
+const { error: eventsError } = await db.supabase.from('events').upsert(dedupedEvents, { onConflict: 'site_id,client_id', ignoreDuplicates: true });
+if (eventsError) console.error('[COLLECT] ❌ Events insert failed:', eventsError);
+else console.log(`[COLLECT] ✅ Inserted ${dedupedEvents.length} events`);    }
     if (heatmapPointsToInsert.length > 0) {
       await db.supabase.from('heatmap_points').insert(heatmapPointsToInsert);
     }
@@ -275,6 +284,7 @@ function generateScript(apiKey, collectUrl, nudgeUrl, config) {
   return `/* TrackFlow v2 + Nudge */
 (function(){
   'use strict';
+  console.log('%c✅ TrackFlow tracking script loaded successfully', 'color: #22c55e; font-weight: bold; font-size: 12px;', { collectUrl: '${collectUrl}', apiKey: '${apiKey}' });
 
   // ── Session ID ──────────────────────────────────────────────────────────────
   var sid = sessionStorage.getItem('tf_sid') || Math.random().toString(36).slice(2)+Date.now().toString(36);
@@ -286,12 +296,19 @@ function generateScript(apiKey, collectUrl, nudgeUrl, config) {
     if (flushing || !queue.length) return;
     flushing = true;
     var batch = queue.splice(0, 20);
+    console.log('%c📤 Sending %d events to TrackFlow', 'color: #3b82f6; font-size: 11px;', batch.length);
     fetch('${collectUrl}', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ k: '${apiKey}', events: batch }),
-      mode: 'cors', keepalive: true
-    }).finally(function(){ flushing = false; if(queue.length) setTimeout(flush, 100); });
+      mode: 'cors', keepalive: true, credentials: 'omit'
+    })
+    .then(function(r) {
+      if(!r.ok) console.error('❌ TrackFlow event delivery failed:', r.status, r.statusText);
+      else console.log('%c✅ Events delivered', 'color: #22c55e; font-size: 11px;');
+    })
+    .catch(function(e) { console.error('❌ TrackFlow fetch error:', e.message); })
+    .finally(function(){ flushing = false; if(queue.length) setTimeout(flush, 100); });
   }
   function send(type, data) {
     queue.push({ type: type, url: location.href, sid: sid, ts: Date.now(), data: data || {} });
