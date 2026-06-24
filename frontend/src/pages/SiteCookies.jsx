@@ -1235,7 +1235,7 @@ export default function SiteCookies() {
             <Shield size={15} className="text-trackflow-text" />
           </div>
           <div>
-            <h1 className="text-[14px] font-semibold text-trackflow-text leading-none">Consent OS</h1>
+            <h1 className="text-[14px] font-semibold text-trackflow-text leading-none">CONSENT OS</h1>
             <p className="text-[11px] text-trackflow-text-3 mt-0.5">Tracking control center</p>
           </div>
         </div>
