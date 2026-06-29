@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const db     = require('../db');
-const { getQueue } = require('../queue');
+const { getQueue, redisConnection } = require('../queue');
 
 // ── Bot detection ─────────────────────────────────────────────────────────────
 const BOT_UA = /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|telegrambot|googlebot|baiduspider|yandexbot|duckduckbot|semrush|ahrefs|headlesschrome|phantomjs|puppeteer|selenium|python-requests|curl\/|wget\//i;
@@ -64,15 +64,17 @@ function parseReferrer(referrer, siteDomain) {
   } catch { return { source: 'direct', medium: 'none', campaign: '' }; }
 }
 
-// ── Per-key in-process rate limit (500 req/min) ───────────────────────────────
-const keyWindows = new Map();
-function isRateLimited(apiKey) {
-  const now  = Date.now();
-  const hits = (keyWindows.get(apiKey) || []).filter(t => now - t < 60_000);
-  if (hits.length >= 500) return true;
-  hits.push(now);
-  keyWindows.set(apiKey, hits);
-  return false;
+// ── Per-key Redis rate limit (500 req/min) ────────────────────────────────────
+async function isRateLimited(apiKey) {
+  try {
+    const key = `rl:${apiKey}`;
+    const count = await redisConnection.incr(key);
+    if (count === 1) await redisConnection.expire(key, 60);
+    return count > 500;
+  } catch {
+    // Redis down → fall through (don't block traffic)
+    return false;
+  }
 }
 
 // ── User hash ─────────────────────────────────────────────────────────────────
@@ -110,7 +112,7 @@ router.post('/collect', async (req, res) => {
       console.log('[collect] rejected: missing API key');
       return;
     }
-    if (isRateLimited(apiKey)) {
+    if (await isRateLimited(apiKey)) {
       console.log('[collect] rejected: rate limited');
       return;
     }

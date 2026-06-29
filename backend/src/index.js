@@ -9,6 +9,13 @@ const db = require('./db');
 const { startWorker } = require('./worker');
 const { getQueue } = require('./queue');
 
+const isProd = process.env.NODE_ENV === 'production';
+
+// Allowed origins: FRONTEND_URL in prod, all in dev
+const CORS_ORIGIN = isProd
+  ? (process.env.FRONTEND_URL || 'http://localhost:4032')
+  : true;
+
 async function startServer() {
   await db.init();
   startWorker();
@@ -18,20 +25,18 @@ async function startServer() {
 
   app.use(helmet({ contentSecurityPolicy:false, crossOriginResourcePolicy:{policy:'cross-origin'}, crossOriginEmbedderPolicy:false, crossOriginOpenerPolicy:false }));
   app.use(compression());
-  app.use(morgan('dev'));
+  if (!isProd) app.use(morgan('dev'));
 
   app.use((req, res, next) => {
-    const ts = new Date().toISOString();
-    const ip = req.ip || req.connection.remoteAddress;
-    console.log(`[${ts}] 📥 ${req.method} ${req.originalUrl} - IP: ${ip}`);
-    const auth = req.headers.authorization;
-    if (auth) console.log(`  🔑 Auth: ${auth.substring(0, 20)}...`);
-    else if (req.originalUrl?.includes('/sites') || req.originalUrl?.includes('/analytics')) console.log(`  ⚠️  No auth header`);
-    res.on('finish', () => console.log(`[${ts}] ${res.statusCode >= 400 ? '❌' : '✅'} ${req.method} ${req.originalUrl} - ${res.statusCode}`));
+    if (!isProd) {
+      const ts = new Date().toISOString();
+      console.log(`[${ts}] 📥 ${req.method} ${req.originalUrl}`);
+      res.on('finish', () => console.log(`[${ts}] ${res.statusCode >= 400 ? '❌' : '✅'} ${req.method} ${req.originalUrl} - ${res.statusCode}`));
+    }
     next();
   });
 
-  app.use(cors({ origin:true, methods:['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders:['Content-Type','Authorization'], credentials:true }));
+  app.use(cors({ origin: CORS_ORIGIN, methods:['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders:['Content-Type','Authorization'], credentials:true }));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.text());
 
@@ -61,6 +66,7 @@ async function startServer() {
   app.listen(PORT, () => {
     console.log(`\n🚀 TrackFlow running on http://localhost:${PORT}`);
     console.log(`📊 Health: http://localhost:${PORT}/health`);
+    console.log(`🔒 CORS origin: ${CORS_ORIGIN}`);
   });
 }
 

@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const db = require('../db');
 const auth = require('../middleware/auth');
 
@@ -8,6 +9,11 @@ function genApiKey() {
   let key = 'tf_';
   for (let i = 0; i < 32; i++) key += chars[Math.floor(Math.random() * chars.length)];
   return key;
+}
+
+// Hash for storage — SHA-256, not bcrypt (API keys are long-random, no need for bcrypt cost)
+function hashApiKey(key) {
+  return crypto.createHash('sha256').update(key).digest('hex');
 }
 
 // List sites
@@ -36,6 +42,7 @@ router.post('/', auth, async (req, res) => {
 
   const id = uuidv4();
   const apiKey = genApiKey();
+  const apiKeyHash = hashApiKey(apiKey);
   
   const { error: insertError } = await db.supabase
     .from('sites')
@@ -44,7 +51,8 @@ router.post('/', auth, async (req, res) => {
       user_id: req.user.id,
       name,
       domain: cleanDomain,
-      api_key: apiKey,
+      api_key: apiKey,         // plaintext — kept for collect.js lookup (hashed lookup is a Day 3 migration)
+      api_key_hash: apiKeyHash,
       config
     });
     
@@ -135,7 +143,7 @@ router.post('/:id/regenerate-key', auth, async (req, res) => {
   
   const { error: updateError } = await db.supabase
     .from('sites')
-    .update({ api_key: newKey })
+    .update({ api_key: newKey, api_key_hash: hashApiKey(newKey) })
     .eq('id', req.params.id);
     
   if (updateError) {
