@@ -59,7 +59,7 @@ function detectUA(ua) {
 
 // ── Referrer attribution ──────────────────────────────────────────────────────
 const SEARCH  = { google:'Google', bing:'Bing', yahoo:'Yahoo', duckduckgo:'DuckDuckGo', baidu:'Baidu', yandex:'Yandex' };
-const SOCIALS = { facebook:'Facebook', instagram:'Instagram', twitter:'Twitter', 'x.com':'Twitter/X', 't.co':'Twitter/X', linkedin:'LinkedIn', youtube:'YouTube', tiktok:'TikTok', reddit:'Reddit' };
+const SOCIALS = { facebook:'Facebook', instagram:'Instagram', twitter:'Twitter', 'x.com':'Twitter/X', 't.co':'Twitter/X', linkedin:'LinkedIn', youtube:'YouTube', tiktok:'TikTok', reddit:'Reddit', 'wa.me':'WhatsApp', 'whatsapp.com':'WhatsApp' };
 
 function parseReferrer(referrer, siteDomain) {
   if (!referrer) return { source: 'direct', medium: 'none', campaign: '' };
@@ -89,7 +89,7 @@ async function isRateLimited(apiKey) {
 
 // ── User hash ─────────────────────────────────────────────────────────────────
 function hashUser(ip, ua) {
-  return crypto.createHash('sha256').update(ip + ua + new Date().toDateString()).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(ip + ua).digest('hex').slice(0, 16);
 }
 
 // ── Tracking script ───────────────────────────────────────────────────────────
@@ -140,29 +140,41 @@ router.post('/collect', async (req, res) => {
     }
 
     const events      = Array.isArray(eventsRaw) ? eventsRaw : [eventsRaw];
-    const userHash    = hashUser(req.ip, ua);
+    const clientUid   = events.find(e => e?.data?.client_uid)?.data?.client_uid;
+    const userHash    = clientUid || hashUser(req.ip, ua);
     const uaInfo      = detectUA(ua);
     const eventRows   = [];
     const sessionMap  = {};
     const dayCounters = {};
+    const touchpoints = [];
 
     for (const evt of events.slice(0, 100)) {
       if (!evt?.type) continue;
 
       const tsSeconds = Math.floor((evt.ts || Date.now()) / 1000);
 
-      // UTM params
-      let utm_source = '', utm_medium = '', utm_campaign = '';
+      // UTM + paid click-ID params
+      let utm_source = '', utm_medium = '', utm_campaign = '', click_id = '';
       try {
         const u = new URL(evt.url || '');
         utm_source   = u.searchParams.get('utm_source')   || evt.data?.utm_source   || '';
         utm_medium   = u.searchParams.get('utm_medium')   || evt.data?.utm_medium   || '';
         utm_campaign = u.searchParams.get('utm_campaign') || evt.data?.utm_campaign || '';
+        click_id = u.searchParams.get('gclid') || u.searchParams.get('fbclid') || u.searchParams.get('msclkid') || u.searchParams.get('ttclid') || '';
       } catch {}
 
-      const { source, medium, campaign } = utm_source
-        ? { source: utm_source, medium: utm_medium || 'referral', campaign: utm_campaign }
-        : parseReferrer(evt.data?.referrer || '', site.domain);
+      let attribution;
+      if (utm_source) {
+        attribution = { source: utm_source, medium: utm_medium || 'referral', campaign: utm_campaign };
+      } else if (click_id) {
+        const platform = new URL(evt.url || 'http://x').searchParams.get('gclid') ? 'Google Ads'
+          : new URL(evt.url || 'http://x').searchParams.get('fbclid') ? 'Facebook Ads'
+          : new URL(evt.url || 'http://x').searchParams.get('msclkid') ? 'Microsoft Ads' : 'TikTok Ads';
+        attribution = { source: platform, medium: 'paid', campaign: '' };
+      } else {
+        attribution = parseReferrer(evt.data?.referrer || '', site.domain);
+      }
+      const { source, medium, campaign } = attribution;
 
       // FIXED: include random nonce so same user clicking same element in same
       // second gets a unique client_id (prevents ignoreDuplicates dropping real events)
@@ -195,6 +207,10 @@ router.post('/collect', async (req, res) => {
             country: evt.data?.country || null,
             ...uaInfo,
           };
+          // Day 10: log a touchpoint at session entry for multi-touch attribution
+          if (userHash) {
+            touchpoints.push({ site_id: site.id, user_hash: userHash, session_id: evt.sid, source, medium, campaign, ts: tsSeconds });
+          }
         } else {
           // Update ended_at and page_count across events in same batch
           if (tsSeconds > existing.ended_at) existing.ended_at = tsSeconds;
@@ -243,6 +259,7 @@ router.post('/collect', async (req, res) => {
         heatmapPoints: eventRows.__heatmap || [],
         sessions:      Object.values(sessionMap),
         dayCounters:   serialCounters,
+        touchpoints,
       }, { removeOnComplete: 100, removeOnFail: 500 });
       if (process.env.NODE_ENV !== 'production') console.log("QUEUE JOB CREATED:", job.id);
     } catch (e) {
@@ -362,6 +379,11 @@ function generateScript(apiKey, collectUrl, config) {
   'use strict';
   var sid=sessionStorage.getItem('tf_sid')||Math.random().toString(36).slice(2)+Date.now().toString(36);
   sessionStorage.setItem('tf_sid',sid);
+  var cuid;
+  try{
+    cuid=localStorage.getItem('tf_cuid');
+    if(!cuid){cuid=(crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c=='x'?r:(r&0x3|0x8);return v.toString(16);}));localStorage.setItem('tf_cuid',cuid);}
+  }catch(e){cuid=null;}
   var queue=[],flushing=false;
   function flush(){
     if(flushing||!queue.length)return;
@@ -370,7 +392,7 @@ function generateScript(apiKey, collectUrl, config) {
     fetch('${collectUrl}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({k:'${apiKey}',events:batch}),mode:'cors',keepalive:true})
     .finally(function(){flushing=false;if(queue.length)setTimeout(flush,100);});
   }
-  function send(type,data){queue.push({type:type,url:location.href,sid:sid,ts:Date.now(),data:data||{}});setTimeout(flush,50);}
+  function send(type,data){var d=data||{};if(cuid)d.client_uid=cuid;queue.push({type:type,url:location.href,sid:sid,ts:Date.now(),data:d});setTimeout(flush,50);}
   function hasConsent(){try{return localStorage.getItem('tf_consent')!=='denied';}catch{return true;}}
   function track(type,data){if(!hasConsent())return;send(type,data);}
 

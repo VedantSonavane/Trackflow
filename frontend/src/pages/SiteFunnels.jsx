@@ -81,15 +81,20 @@ export default function SiteFunnels() {
   const [customSteps, setCustomSteps] = useState([]);
   const [stepInput, setStepInput]   = useState('');
   const [showCustom, setShowCustom] = useState(false);
+  const [segments, setSegments] = useState([]);
+  const [segmentId, setSegmentId] = useState('');
 
   const to   = Math.floor(Date.now() / 1000);
   const from = to - range * 86400;
+  const segParam = segmentId ? `&segment=${segmentId}` : '';
+
+  useEffect(() => { api.get(`/analytics/${id}/segments`).then(setSegments).catch(() => {}); }, [id]);
 
   async function fetchFunnels(steps) {
     setLoading(true);
     try {
       const stepsParam = steps?.length ? `&steps=${steps.join(',')}` : '';
-      const result = await api.get(`/analytics/${id}/funnels?from=${from}&to=${to}${stepsParam}`);
+      const result = await api.get(`/analytics/${id}/funnels?from=${from}&to=${to}${stepsParam}${segParam}`);
       setFunnels(result?.length ? result : MOCK_FUNNELS);
     } catch { setFunnels(MOCK_FUNNELS); }
     setLoading(false);
@@ -98,7 +103,7 @@ export default function SiteFunnels() {
   async function fetchEcomFunnel() {
     setLoading(true);
     try {
-      const data = await api.get(`/analytics/${id}/ecommerce?from=${from}&to=${to}`);
+      const data = await api.get(`/analytics/${id}/ecommerce?from=${from}&to=${to}${segParam}`);
       if (data?.checkoutFunnel?.length) {
         setEcomFunnel(data.checkoutFunnel);
       } else {
@@ -111,7 +116,7 @@ export default function SiteFunnels() {
   useEffect(() => {
     if (mode === 'pages') fetchFunnels(customSteps);
     else fetchEcomFunnel();
-  }, [id, range, mode]);
+  }, [id, range, mode, segmentId]);
 
   function addStep() {
     const val = stepInput.trim();
@@ -153,6 +158,13 @@ export default function SiteFunnels() {
         </div>
       </div>
 
+      {segments.length > 0 && (
+        <select value={segmentId} onChange={e => setSegmentId(e.target.value)} className="mb-3 px-2.5 py-1.5 border border-trackflow-border rounded-md text-[12px] bg-white outline-none">
+          <option value="">All sessions</option>
+          {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      )}
+
       {/* Mode toggle */}
       <div className="flex gap-0.5 bg-trackflow-bg-2 rounded-md p-0.5 w-fit mb-5">
         <button onClick={() => setMode('pages')} className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded text-[12px] font-sans cursor-pointer transition-all ${mode==='pages'?'bg-white text-trackflow-text font-medium shadow-sm':'text-trackflow-text-2'}`}>
@@ -165,9 +177,9 @@ export default function SiteFunnels() {
 
       {mode === 'pages' && showCustom && (
         <div className="bg-white border border-trackflow-bg-3 rounded-xl p-4 mb-5">
-          <p className="text-[11px] text-trackflow-text-3 mb-3">Enter page paths (e.g. <code className="font-mono bg-trackflow-bg-2 px-1 rounded">/pricing</code>)</p>
+          <p className="text-[11px] text-trackflow-text-3 mb-3">Enter a page path (e.g. <code className="font-mono bg-trackflow-bg-2 px-1 rounded">/pricing</code>) or an event type prefixed <code className="font-mono bg-trackflow-bg-2 px-1 rounded">type:</code> (e.g. <code className="font-mono bg-trackflow-bg-2 px-1 rounded">type:click</code>). Steps are matched in order entered.</p>
           <div className="flex gap-2 mb-3">
-            <input value={stepInput} onChange={e=>setStepInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addStep()} placeholder="/pricing"
+            <input value={stepInput} onChange={e=>setStepInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addStep()} placeholder="/pricing or type:click"
               className="flex-1 px-2.5 py-1.5 border border-trackflow-border rounded-md text-[12px] font-mono outline-none focus:border-trackflow-border-2 bg-trackflow-bg" />
             <button onClick={addStep} className="px-3 py-1.5 bg-trackflow-accent text-white rounded-md text-xs font-sans cursor-pointer hover:bg-trackflow-accent-hover">Add</button>
           </div>

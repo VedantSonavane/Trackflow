@@ -11,10 +11,14 @@ const FIELDS = [
   { key: 'medium', label: 'Medium', ops: ['eq', 'neq'] },
   { key: 'event', label: 'Event type', ops: ['eq'] },
   { key: 'date', label: 'Date (last N days)', ops: ['within'] },
+  { key: 'sequence', label: 'Sequence (did A then B)', ops: ['followedBy'] },
 ];
 
 function emptyRow() {
   return { field: 'country', op: 'eq', value: '' };
+}
+function emptySequenceRow() {
+  return { field: 'sequence', op: 'followedBy', first: '', then: '', withinDays: 7 };
 }
 
 export default function SiteSegments() {
@@ -39,7 +43,9 @@ export default function SiteSegments() {
   function removeRow(i) { setRows(r => r.filter((_, idx) => idx !== i)); }
 
   async function saveSegment() {
-    if (!name.trim() || rows.some(r => !r.value && r.op !== 'within')) return;
+    if (!name.trim()) return;
+    const invalid = rows.some(r => r.field === 'sequence' ? (!r.first || !r.then) : (!r.value && r.op !== 'within'));
+    if (invalid) return;
     setSaving(true);
     try {
       await api.post(`/analytics/${id}/segments`, { name: name.trim(), filters: rows });
@@ -80,6 +86,7 @@ export default function SiteSegments() {
                   value={row.field}
                   onChange={e => {
                     const f = FIELDS.find(x => x.key === e.target.value);
+                    if (e.target.value === 'sequence') { setRows(r => r.map((rr, idx) => idx === i ? emptySequenceRow() : rr)); return; }
                     updateRow(i, 'field', e.target.value);
                     updateRow(i, 'op', f.ops[0]);
                   }}
@@ -87,6 +94,20 @@ export default function SiteSegments() {
                 >
                   {FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                 </select>
+                {row.field === 'sequence' ? (
+                  <>
+                    <input value={row.first} onChange={e => updateRow(i, 'first', e.target.value)} placeholder="first event (e.g. add_to_cart)"
+                      className="flex-1 px-2.5 py-1.5 border border-trackflow-border rounded-md text-[12px] bg-trackflow-bg outline-none" />
+                    <span className="text-[11px] text-trackflow-text-3 shrink-0">followed by</span>
+                    <input value={row.then} onChange={e => updateRow(i, 'then', e.target.value)} placeholder="then event (e.g. purchase)"
+                      className="flex-1 px-2.5 py-1.5 border border-trackflow-border rounded-md text-[12px] bg-trackflow-bg outline-none" />
+                    <span className="text-[11px] text-trackflow-text-3 shrink-0">within</span>
+                    <input type="number" value={row.withinDays} onChange={e => updateRow(i, 'withinDays', e.target.value)} placeholder="7"
+                      className="w-16 px-2 py-1.5 border border-trackflow-border rounded-md text-[12px] bg-trackflow-bg outline-none" />
+                    <span className="text-[11px] text-trackflow-text-3 shrink-0">days</span>
+                  </>
+                ) : (
+                  <>
                 <select
                   value={row.op}
                   onChange={e => updateRow(i, 'op', e.target.value)}
@@ -100,6 +121,8 @@ export default function SiteSegments() {
                   placeholder={row.field === 'date' ? 'days, e.g. 7' : 'value'}
                   className="flex-1 px-2.5 py-1.5 border border-trackflow-border rounded-md text-[12px] bg-trackflow-bg outline-none"
                 />
+                  </>
+                )}
                 <button onClick={() => removeRow(i)} className="p-1.5 text-trackflow-text-3 hover:text-red-500">
                   <Trash2 size={13} />
                 </button>
@@ -141,7 +164,7 @@ export default function SiteSegments() {
                   <div className="flex gap-1 flex-wrap mt-1">
                     {(seg.filters || []).map((f, i) => (
                       <span key={i} className="text-[10px] bg-trackflow-bg-2 text-trackflow-text-3 px-1.5 py-0.5 rounded font-mono">
-                        {f.field} {f.op} {f.value}
+                        {f.field === 'sequence' ? `${f.first} → ${f.then} (${f.withinDays}d)` : `${f.field} ${f.op} ${f.value}`}
                       </span>
                     ))}
                   </div>

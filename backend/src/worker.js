@@ -11,7 +11,7 @@ function startWorker() {
   const worker = new Worker(
     QUEUE_NAME,
     async job => {
-      const { events, heatmapPoints, sessions, dayCounters, siteId } = job.data;
+      const { events, heatmapPoints, sessions, dayCounters, siteId, touchpoints } = job.data;
       const supabase = db.supabase;
 
       // ── Events — batch 50, dedup by client_id ─────────────────────────────
@@ -73,7 +73,6 @@ function startWorker() {
           }));
 
         if (anonRows.length) {
-          // Use raw SQL upsert to increment session_count + update last_seen
           for (const row of anonRows) {
             const { error: anonErr } = await supabase.rpc('upsert_user_anonymous', {
               p_site_id:    row.site_id,
@@ -83,7 +82,6 @@ function startWorker() {
             }).catch(() => ({ error: { message: 'rpc missing' } }));
 
             if (anonErr) {
-              // Fallback: simple upsert (won't increment count but won't crash)
               await supabase.from('users_anonymous').upsert(row, {
                 onConflict: 'user_hash,site_id',
                 ignoreDuplicates: false,
@@ -92,6 +90,13 @@ function startWorker() {
           }
           console.log(`✅ users_anonymous: ${anonRows.length}`);
         }
+      }
+
+      // ── Touchpoints (Day 10 — multi-touch attribution) ─────────────────────
+      if (touchpoints?.length) {
+        const { error } = await supabase.from('touchpoints').insert(touchpoints);
+        if (error) console.error('❌ touchpoints insert:', error.message);
+        else console.log(`✅ touchpoints: ${touchpoints.length}`);
       }
 
       // ── Heatmap ──────────────────────────────────────────────────────────

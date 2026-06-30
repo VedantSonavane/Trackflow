@@ -138,9 +138,43 @@ router.get('/:siteId/overview', auth, cached(async (req, res) => {
 }));
 
 // ── Traffic sources breakdown ─────────────────────────────────────────────────
-router.get('/:siteId/sources', auth, async (req, res) => {
+// ── Attribution (multi-touch) ──────────────────────────────────────────────────
+router.get('/:siteId/attribution', auth, async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
-  const { from = Date.now() / 1000 - 86400 * 7, to = Date.now() / 1000 } = req.query;
+  const { from = Date.now() / 1000 - 86400 * 30, to = Date.now() / 1000, model = 'linear' } = req.query;
+  const fromTs = Math.floor(parseFloat(from));
+  const toTs = Math.floor(parseFloat(to));
+
+  const { data: tps, error } = await db.supabase
+    .from('touchpoints').select('user_hash, source, medium, campaign, ts')
+    .eq('site_id', site.id).gte('ts', fromTs).lte('ts', toTs)
+    .not('user_hash', 'is', null).order('ts', { ascending: true });
+  if (error) return res.status(500).json({ error: 'Database error' });
+
+  const journeys = {};
+  (tps || []).forEach(t => { (journeys[t.user_hash] ||= []).push(t); });
+
+  const credit = {}; // key: "source|medium" -> weighted credit
+  const addCredit = (t, weight) => {
+    const key = `${t.source}|${t.medium}`;
+    credit[key] = (credit[key] || 0) + weight;
+  };
+
+  Object.values(journeys).forEach(touches => {
+    if (!touches.length) return;
+    if (model === 'first') addCredit(touches[0], 1);
+    else if (model === 'last') addCredit(touches[touches.length - 1], 1);
+    else { const w = 1 / touches.length; touches.forEach(t => addCredit(t, w)); } // linear
+  });
+
+  const results = Object.entries(credit)
+    .map(([key, value]) => { const [source, medium] = key.split('|'); return { source, medium, credit: Math.round(value * 100) / 100 }; })
+    .sort((a, b) => b.credit - a.credit);
+
+  res.json({ model, totalUsers: Object.keys(journeys).length, results });
+});
+
+
   const fromTs = Math.floor(parseFloat(from));
   const toTs = Math.floor(parseFloat(to));
 

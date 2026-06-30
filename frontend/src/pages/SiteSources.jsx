@@ -73,6 +73,17 @@ export default function SiteSources() {
   const range = filters?.dateRange ?? 7;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [attrModel, setAttrModel] = useState('linear');
+  const [attribution, setAttribution] = useState(null);
+
+  async function fetchAttribution(model) {
+    try {
+      const to = Math.floor(Date.now() / 1000);
+      const from = to - range * 86400;
+      const result = await api.get(`/analytics/${id}/attribution?from=${from}&to=${to}&model=${model}`);
+      setAttribution(result);
+    } catch { setAttribution(null); }
+  }
 
   async function fetchSources() {
     setLoading(true);
@@ -88,7 +99,8 @@ export default function SiteSources() {
     setLoading(false);
   }
 
-  useEffect(() => { fetchSources(); }, [id, range]);
+  useEffect(() => { fetchSources(); fetchAttribution(attrModel); }, [id, range]);
+  useEffect(() => { fetchAttribution(attrModel); }, [attrModel]);
 
   return (
     <div className="p-6 flex-1 overflow-auto bg-trackflow-bg">
@@ -138,6 +150,34 @@ export default function SiteSources() {
               <p className="text-xs text-trackflow-text-3">No UTM campaign data yet. Add <code className="font-mono bg-trackflow-bg-2 px-1 rounded">?utm_source=…&utm_medium=…&utm_campaign=…</code> to your links to track campaigns.</p>
             </div>
           )}
+
+          {/* Multi-touch attribution */}
+          <div className="bg-white border border-trackflow-bg-3 rounded-xl overflow-hidden mt-4">
+            <div className="px-5 py-4 border-b border-trackflow-bg-2 flex items-center justify-between">
+              <h3 className="text-[11px] font-medium text-trackflow-text-2 tracking-wide uppercase">Multi-touch attribution</h3>
+              <div className="flex gap-0.5 bg-trackflow-bg-2 rounded-md p-0.5">
+                {['first', 'linear', 'last'].map(m => (
+                  <button key={m} onClick={() => setAttrModel(m)}
+                    className={`px-2.5 py-1 rounded text-[11px] cursor-pointer transition-all ${attrModel === m ? 'bg-white text-trackflow-text font-medium shadow-sm' : 'text-trackflow-text-2'}`}>
+                    {m}-touch
+                  </button>
+                ))}
+              </div>
+            </div>
+            {!attribution?.results?.length ? (
+              <div className="p-8 text-center text-trackflow-text-3 text-xs">No attribution data</div>
+            ) : (
+              <div className="divide-y divide-trackflow-bg-2">
+                {attribution.results.slice(0, 10).map((r, i) => (
+                  <div key={i} className="px-5 py-2.5 flex items-center gap-3">
+                    <span className="text-xs text-trackflow-text-2 w-32 shrink-0 truncate capitalize">{r.source}</span>
+                    <span className="text-[10px] text-trackflow-text-3 w-20 shrink-0">{r.medium}</span>
+                    <span className="font-mono text-[12px] text-trackflow-text ml-auto">{r.credit} credit</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </>
       )}
 
