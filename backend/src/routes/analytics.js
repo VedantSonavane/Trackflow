@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
+const { sseAuth } = require('../middleware/auth');
 const { resolveSegmentSessionIds } = require('../segments');
 const NodeCache = require('node-cache');
 
@@ -265,7 +266,7 @@ router.get('/:siteId/retention', auth, cached(async (req, res) => {
 }));
 
 // ── Realtime SSE ──────────────────────────────────────────────────────────────
-router.get('/:siteId/realtime/stream', auth, async (req, res) => {
+router.get('/:siteId/realtime/stream', sseAuth, async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');

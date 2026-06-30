@@ -126,18 +126,72 @@ CREATE TABLE IF NOT EXISTS retention_cohorts (
   PRIMARY KEY (site_id, cohort_week, return_week)
 );
 
+-- ── Sites: api_key_hash (Day 6 hashed-key migration) ───────────────────────
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS api_key_hash TEXT;
+CREATE INDEX IF NOT EXISTS idx_sites_api_key_hash ON sites(api_key_hash);
+
+-- ── Identified users (cross-device identity) ───────────────────────────────
+CREATE TABLE IF NOT EXISTS users_identified (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  site_id UUID REFERENCES sites(id) ON DELETE CASCADE,
+  user_hash TEXT NOT NULL,
+  user_id TEXT,
+  traits JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── Ecommerce events ────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ecommerce_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  session_id TEXT,
+  user_hash TEXT,
+  event TEXT NOT NULL,
+  value NUMERIC,
+  currency TEXT DEFAULT 'USD',
+  items JSONB DEFAULT '[]'::jsonb,
+  ts BIGINT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── Segments ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS segments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  filters JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── Failed events (dead-letter) ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS failed_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id UUID,
+  payload JSONB,
+  error TEXT,
+  failed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ── Indexes ───────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_events_site_ts ON events(site_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(site_id, source);
+CREATE INDEX IF NOT EXISTS idx_events_site_type_ts ON events(site_id, type, ts);
 CREATE INDEX IF NOT EXISTS idx_heatmap_site_url ON heatmap_points(site_id, url);
+CREATE INDEX IF NOT EXISTS idx_heatmap_site_url_ts ON heatmap_points(site_id, url, ts);
 CREATE INDEX IF NOT EXISTS idx_sites_api_key ON sites(api_key);
 CREATE INDEX IF NOT EXISTS idx_sites_user_id ON sites(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_site_started ON sessions(site_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(site_id, source);
 CREATE INDEX IF NOT EXISTS idx_daily_stats_site_day ON daily_stats(site_id, day);
 CREATE INDEX IF NOT EXISTS idx_users_anon_site ON users_anonymous(site_id);
+CREATE INDEX IF NOT EXISTS idx_users_anon_site_lastseen ON users_anonymous(site_id, last_seen);
+CREATE INDEX IF NOT EXISTS idx_users_identified_site ON users_identified(site_id, user_hash);
+CREATE INDEX IF NOT EXISTS idx_ecommerce_site_ts ON ecommerce_events(site_id, ts);
+CREATE INDEX IF NOT EXISTS idx_segments_site ON segments(site_id);
+CREATE INDEX IF NOT EXISTS idx_failed_events_site ON failed_events(site_id);
 
 -- ── RPC: increment_daily_stats ─────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION increment_daily_stats(

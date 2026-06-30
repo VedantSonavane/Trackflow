@@ -3,6 +3,10 @@ const crypto = require('crypto');
 const db     = require('../db');
 const { getQueue, redisConnection } = require('../queue');
 
+function hashApiKey(key) {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
+
 // ── Bot detection ─────────────────────────────────────────────────────────────
 const BOT_UA = /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|telegrambot|googlebot|baiduspider|yandexbot|duckduckbot|semrush|ahrefs|headlesschrome|phantomjs|puppeteer|selenium|python-requests|curl\/|wget\//i;
 
@@ -20,7 +24,13 @@ const SITE_TTL  = 60_000;
 async function getSite(apiKey) {
   const hit = siteCache.get(apiKey);
   if (hit && Date.now() - hit.ts < SITE_TTL) return hit.data;
-  const { data, error } = await db.supabase.from('sites').select('*').eq('api_key', apiKey).maybeSingle();
+  const keyHash = hashApiKey(apiKey);
+  let { data, error } = await db.supabase.from('sites').select('*').eq('api_key_hash', keyHash).maybeSingle();
+  if ((error || !data)) {
+    // Fallback for sites created before hash migration (plaintext api_key only)
+    const fallback = await db.supabase.from('sites').select('*').eq('api_key', apiKey).maybeSingle();
+    data = fallback.data; error = fallback.error;
+  }
   if (error || !data) {
     console.error('SITE LOOKUP FAILED', error);
     return null;

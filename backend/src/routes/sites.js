@@ -29,7 +29,7 @@ router.get('/', auth, async (req, res) => {
     return res.status(500).json({ error: 'Database error' });
   }
   
-  res.json(sites.map(s => ({ ...s, config: s.config })));
+  res.json(sites.map(s => ({ ...s, api_key: undefined, api_key_masked: s.api_key ? s.api_key.slice(0, 6) + '…' : null, config: s.config })));
 });
 
 // Create site
@@ -89,7 +89,7 @@ router.get('/:id', auth, async (req, res) => {
   }
   
   if (!site) return res.status(404).json({ error: 'Not found' });
-  res.json({ ...site, config: site.config });
+  res.json({ ...site, api_key: undefined, api_key_masked: site.api_key ? site.api_key.slice(0, 6) + '…' : null, config: site.config });
 });
 
 // Update site config
@@ -125,7 +125,7 @@ router.patch('/:id', auth, async (req, res) => {
     .eq('id', req.params.id)
     .single();
     
-  res.json({ ...updated, config: updated.config });
+  res.json({ ...updated, api_key: undefined, api_key_masked: updated.api_key ? updated.api_key.slice(0, 6) + '…' : null, config: updated.config });
 });
 
 // Regenerate API key
