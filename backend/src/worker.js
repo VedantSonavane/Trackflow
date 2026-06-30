@@ -130,7 +130,18 @@ function startWorker() {
     { connection: redisConnection, concurrency: 5 }
   );
 
-  worker.on('failed', (job, err) => console.error(`❌ job ${job?.id} failed:`, err.message));
+  worker.on('failed', async (job, err) => {
+    console.error(`❌ job ${job?.id} failed:`, err.message);
+    if (job?.attemptsMade >= (job?.opts?.attempts || 1)) {
+      try {
+        await db.supabase.from('failed_events').insert({
+          site_id: job.data?.siteId || null,
+          payload: job.data,
+          error: err.message,
+        });
+      } catch (e) { console.error('❌ dead-letter insert failed:', e.message); }
+    }
+  });
   console.log('✓ Event worker started');
   return worker;
 }

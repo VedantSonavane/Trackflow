@@ -2,6 +2,20 @@ const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
 const { resolveSegmentSessionIds } = require('../segments');
+const NodeCache = require('node-cache');
+
+const cache = new NodeCache({ stdTTL: 300 }); // 5min TTL
+function cacheKey(req) { return `${req.params.siteId}:${req.path}:${JSON.stringify(req.query)}`; }
+function cached(handler) {
+  return async (req, res) => {
+    const key = cacheKey(req);
+    const hit = cache.get(key);
+    if (hit) return res.json(hit);
+    const origJson = res.json.bind(res);
+    res.json = (body) => { cache.set(key, body); return origJson(body); };
+    return handler(req, res);
+  };
+}
 
 async function siteGuard(req, res) {
   const { data: site, error } = await db.supabase
@@ -46,7 +60,7 @@ async function getSegmentScope(req, site) {
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
-router.get('/:siteId/overview', auth, async (req, res) => {
+router.get('/:siteId/overview', auth, cached(async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
   const segmentScope = await getSegmentScope(req, site);
   const { from = Date.now() / 1000 - 86400 * 7, to = Date.now() / 1000 } = req.query;
@@ -120,7 +134,7 @@ router.get('/:siteId/overview', auth, async (req, res) => {
     avgLCP, avgCLS,
     byDay, topPages, topReferrers,
   });
-});
+}));
 
 // ── Traffic sources breakdown ─────────────────────────────────────────────────
 router.get('/:siteId/sources', auth, async (req, res) => {
@@ -216,7 +230,7 @@ router.get('/:siteId/conversions', auth, async (req, res) => {
 });
 
 // ── Retention ─────────────────────────────────────────────────────────────────
-router.get('/:siteId/retention', auth, async (req, res) => {
+router.get('/:siteId/retention', auth, cached(async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
   const { weeks = 8 } = req.query;
   const weeksInt = Math.min(parseInt(weeks) || 8, 16);
@@ -248,7 +262,7 @@ router.get('/:siteId/retention', auth, async (req, res) => {
   });
 
   res.json({ cohorts });
-});
+}));
 
 // ── Realtime SSE ──────────────────────────────────────────────────────────────
 router.get('/:siteId/realtime/stream', auth, async (req, res) => {
@@ -454,7 +468,7 @@ router.get('/:siteId/insights', auth, async (req, res) => {
 });
 
 // ── Audience (real data) ──────────────────────────────────────────────────────
-router.get('/:siteId/audience', auth, async (req, res) => {
+router.get('/:siteId/audience', auth, cached(async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
   const { from = Date.now()/1000 - 86400*7, to = Date.now()/1000 } = req.query;
   const fromTs = Math.floor(parseFloat(from));
@@ -478,7 +492,7 @@ router.get('/:siteId/audience', auth, async (req, res) => {
   };
 
   res.json({ devices: count(rows,'device_type'), browsers: count(rows,'browser'), countries: countryCount(rows) });
-});
+}));
 
 // ── Users list ────────────────────────────────────────────────────────────────
 router.get('/:siteId/users', auth, async (req, res) => {
@@ -533,7 +547,7 @@ router.get('/:siteId/users/:hash', auth, async (req, res) => {
 });
 
 // ── Ecommerce ─────────────────────────────────────────────────────────────────
-router.get('/:siteId/ecommerce', auth, async (req, res) => {
+router.get('/:siteId/ecommerce', auth, cached(async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
   const segmentScope = await getSegmentScope(req, site);
   const { from = Date.now() / 1000 - 86400 * 7, to = Date.now() / 1000 } = req.query;
@@ -615,7 +629,7 @@ router.get('/:siteId/ecommerce', auth, async (req, res) => {
     topProducts,
     checkoutFunnel,
   });
-});
+}));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function normPath(url) {

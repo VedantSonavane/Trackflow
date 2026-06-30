@@ -217,12 +217,14 @@ router.post('/collect', async (req, res) => {
       serialCounters[day] = { pageviews: c.pageviews, sessions: c.sessions.size, clicks: c.clicks, rage_clicks: c.rage_clicks, errors: c.errors };
     }
 
-    console.log("ADDING EVENT JOB", {
-      siteId: site.id,
-      events: eventRows.length,
-      sessions: Object.keys(sessionMap).length,
-      heatmap: (eventRows.__heatmap || []).length
-    });
+    if (process.env.NODE_ENV !== 'production') {
+      console.log("ADDING EVENT JOB", {
+        siteId: site.id,
+        events: eventRows.length,
+        sessions: Object.keys(sessionMap).length,
+        heatmap: (eventRows.__heatmap || []).length
+      });
+    }
 
     try {
       const job = await getQueue().add('process', {
@@ -232,7 +234,7 @@ router.post('/collect', async (req, res) => {
         sessions:      Object.values(sessionMap),
         dayCounters:   serialCounters,
       }, { removeOnComplete: 100, removeOnFail: 500 });
-      console.log("QUEUE JOB CREATED:", job.id);
+      if (process.env.NODE_ENV !== 'production') console.log("QUEUE JOB CREATED:", job.id);
     } catch (e) {
       console.error("QUEUE ADD FAILED:", e);
     }

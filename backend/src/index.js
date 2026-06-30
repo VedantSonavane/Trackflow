@@ -8,6 +8,8 @@ const rateLimit = require('express-rate-limit');
 const db = require('./db');
 const { startWorker } = require('./worker');
 const { getQueue } = require('./queue');
+const { startCron } = require('./cron');
+const { requestLogger } = require('./logger');
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -19,6 +21,7 @@ const CORS_ORIGIN = isProd
 async function startServer() {
   await db.init();
   startWorker();
+  startCron();
 
   const app = express();
   const PORT = process.env.PORT || 3251;
@@ -27,14 +30,7 @@ async function startServer() {
   app.use(compression());
   if (!isProd) app.use(morgan('dev'));
 
-  app.use((req, res, next) => {
-    if (!isProd) {
-      const ts = new Date().toISOString();
-      console.log(`[${ts}] 📥 ${req.method} ${req.originalUrl}`);
-      res.on('finish', () => console.log(`[${ts}] ${res.statusCode >= 400 ? '❌' : '✅'} ${req.method} ${req.originalUrl} - ${res.statusCode}`));
-    }
-    next();
-  });
+  app.use(requestLogger);
 
   app.use(cors({ origin: CORS_ORIGIN, methods:['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders:['Content-Type','Authorization'], credentials:true }));
   app.use(express.json({ limit: '1mb' }));
@@ -53,10 +49,16 @@ async function startServer() {
   app.get('/health', async (req, res) => {
     try {
       const q = getQueue();
-      const [waiting, active, failed] = await Promise.all([q.getWaitingCount(), q.getActiveCount(), q.getFailedCount()]);
-      res.json({ ok:true, ts:Date.now(), port:PORT, queue:{ waiting, active, failed } });
+      const [waiting, active, failed, completed] = await Promise.all([
+        q.getWaitingCount(), q.getActiveCount(), q.getFailedCount(), q.getCompletedCount(),
+      ]);
+      res.json({
+        ok: true, ts: Date.now(), port: PORT,
+        queue: { waiting, active, failed, completed },
+        worker: { running: true },
+      });
     } catch {
-      res.json({ ok:true, ts:Date.now(), port:PORT, queue:'unavailable' });
+      res.json({ ok: true, ts: Date.now(), port: PORT, queue: 'unavailable', worker: { running: false } });
     }
   });
 
