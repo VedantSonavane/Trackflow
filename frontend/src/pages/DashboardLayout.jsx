@@ -1,7 +1,8 @@
 import React, { useState, createContext, useContext, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate, useParams, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.jsx';
-import { BarChart2, Zap, Map, Code, LogOut, ChevronLeft, ChevronRight, Bell, Search, Activity, Layers, GitFork, Navigation, Users, Terminal, TrendingUp, Cookie, Target } from 'lucide-react';
+import { api } from '../utils/api.js';
+import { BarChart2, Zap, Map, Code, LogOut, ChevronLeft, ChevronRight, Bell, Search, Activity, Layers, GitFork, Navigation, Users, Terminal, TrendingUp, Cookie, ShoppingCart, Filter } from 'lucide-react';
 import logo from "./logo2.svg";
 
 export const FilterContext = createContext({});
@@ -41,6 +42,8 @@ export default function DashboardLayout() {
   const [country, setCountryState] = useState(() => searchParams.get('country') || 'All countries');
   const [device, setDeviceState] = useState(() => searchParams.get('device') || 'All devices');
   const [source, setSourceState] = useState(() => searchParams.get('source') || 'All sources');
+  const [segment, setSegmentState] = useState(() => searchParams.get('segment') || '');
+  const [segmentsList, setSegmentsList] = useState([]);
 
   function updateParam(key, value, defaultValue) {
     setSearchParams(prev => {
@@ -55,23 +58,32 @@ export default function DashboardLayout() {
   function setCountry(v) { setCountryState(v); updateParam('country', v, 'All countries'); }
   function setDevice(v) { setDeviceState(v); updateParam('device', v, 'All devices'); }
   function setSource(v) { setSourceState(v); updateParam('source', v, 'All sources'); }
+  function setSegment(v) { setSegmentState(v); updateParam('segment', v, ''); }
+
+  useEffect(() => {
+    if (!id) return;
+    api.get(`/analytics/${id}/segments`).then(setSegmentsList).catch(() => setSegmentsList([]));
+  }, [id]);
 
   function handleLogout() { logout(); navigate('/auth'); }
 
   const inSite = location.pathname.startsWith('/sites/');
-  const filters = { dateRange, country, device, source };
-  const hasActiveFilters = country !== 'All countries' || device !== 'All devices' || source !== 'All sources';
+  const filters = { dateRange, country, device, source, segment };
+  const hasActiveFilters = country !== 'All countries' || device !== 'All devices' || source !== 'All sources' || segment;
 
   const siteNavItems = [
     { to: `/sites/${id}`, label: 'Overview', icon: BarChart2, end: true },
+    { to: `/sites/${id}/users`, label: 'Users', icon: Users },
     { to: `/sites/${id}/scroll`, label: 'Scroll', icon: Layers },
     { to: `/sites/${id}/funnels`, label: 'Funnels', icon: GitFork },
-    { to: `/sites/${id}/retention`, label: 'Retention', icon: Users },
+    { to: `/sites/${id}/retention`, label: 'Retention', icon: Activity },
     { to: `/sites/${id}/flow`, label: 'Flow', icon: Navigation },
     { to: `/sites/${id}/sources`, label: 'Sources', icon: TrendingUp },
     { to: `/sites/${id}/events`, label: 'Events', icon: Zap },
     { to: `/sites/${id}/debugger`, label: 'Debugger', icon: Terminal },
     { to: `/sites/${id}/heatmap`, label: 'Heatmap', icon: Map },
+    { to: `/sites/${id}/ecommerce`, label: 'Ecommerce', icon: ShoppingCart },
+    { to: `/sites/${id}/segments`, label: 'Segments', icon: Filter },
     { to: `/sites/${id}/cookies`, label: 'Cookies', icon: Cookie },
     { to: `/sites/${id}/generate`, label: 'Script', icon: Code },
   ];
@@ -93,7 +105,8 @@ export default function DashboardLayout() {
                 {!collapsed && (
                   <NavLink to="/" className="flex items-center justify-center gap-1.5 py-1.5 px-2 text-xs text-trackflow-text-3 rounded no-underline mb-0.5 hover:bg-trackflow-bg-2">
                     <ChevronLeft size={13} />
-Back                  </NavLink>
+                    Back
+                  </NavLink>
                 )}
                 <div className="h-px bg-trackflow-bg-3 my-2" />
                 {siteNavItems.map(({ to, label, icon: Icon, end }) => (
@@ -189,9 +202,18 @@ Back                  </NavLink>
               <FilterSelect value={country} onChange={setCountry} options={COUNTRIES} />
               <FilterSelect value={device} onChange={setDevice} options={DEVICES} />
               <FilterSelect value={source} onChange={setSource} options={SOURCES} />
+              <div className="h-4 w-px bg-trackflow-bg-3" />
+              <select
+                value={segment}
+                onChange={e => setSegment(e.target.value)}
+                className="h-7 px-2.5 text-[11px] border border-trackflow-bg-3 rounded-md bg-white text-trackflow-text-2 outline-none font-sans appearance-none cursor-pointer hover:border-trackflow-border-2 transition-colors"
+              >
+                <option value="">All users (no segment)</option>
+                {segmentsList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
               {hasActiveFilters && (
                 <button
-                  onClick={() => { setCountry('All countries'); setDevice('All devices'); setSource('All sources'); }}
+                  onClick={() => { setCountry('All countries'); setDevice('All devices'); setSource('All sources'); setSegment(''); }}
                   className="text-[11px] text-trackflow-accent hover:underline transition-colors ml-1"
                 >
                   Clear filters

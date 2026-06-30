@@ -10,33 +10,6 @@ import {
 import { Squircle } from '@squircle-js/react';
 import { useFilters } from './DashboardLayout.jsx';
 
-// ── Mock fallback ─────────────────────────────────────────────────────────────
-const MOCK_COUNTRIES = [
-  { country: 'United States', sessions: 1240 },
-  { country: 'United Kingdom', sessions: 430 },
-  { country: 'India', sessions: 380 },
-  { country: 'Germany', sessions: 210 },
-  { country: 'Canada', sessions: 175 },
-];
-const MOCK_DEVICES = [
-  { name: 'Desktop', value: 58 },
-  { name: 'Mobile', value: 34 },
-  { name: 'Tablet', value: 8 },
-];
-const MOCK_BROWSERS = [
-  { browser: 'Chrome', pct: 62 },
-  { browser: 'Safari', pct: 22 },
-  { browser: 'Firefox', pct: 9 },
-  { browser: 'Edge', pct: 5 },
-  { browser: 'Other', pct: 2 },
-];
-const MOCK_SOURCES = [
-  { source: 'Direct', sessions: 520, pct: 38 },
-  { source: 'Organic search', sessions: 410, pct: 30 },
-  { source: 'Social', sessions: 220, pct: 16 },
-  { source: 'Email', sessions: 130, pct: 10 },
-  { source: 'Referral', sessions: 80, pct: 6 },
-];
 const DEVICE_COLORS = ['#111110', '#6366f1', '#d1d5db'];
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
@@ -369,6 +342,7 @@ export default function SiteOverview() {
   const [stats, setStats] = useState(null);
   const [prevStats, setPrevStats] = useState(null);
   const [insights, setInsights] = useState([]);
+  const [audience, setAudience] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scriptStatus, setScriptStatus] = useState('unknown');
   const [lastEventTime, setLastEventTime] = useState(null);
@@ -378,7 +352,17 @@ export default function SiteOverview() {
     fetchStats();
     checkScriptStatus();
     fetchInsights();
+    fetchAudience();
   }, [id, range]);
+
+  async function fetchAudience() {
+    try {
+      const to = Math.floor(Date.now() / 1000);
+      const from = to - range * 86400;
+      const data = await api.get(`/analytics/${id}/audience?from=${from}&to=${to}`);
+      setAudience(data);
+    } catch {}
+  }
 
   async function fetchStats() {
     setLoading(true);
@@ -568,9 +552,9 @@ export default function SiteOverview() {
 
           {/* ── Audience row ── */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-            <CountryChart data={MOCK_COUNTRIES} />
-            <DeviceChart data={MOCK_DEVICES} />
-            <BrowserList data={MOCK_BROWSERS} />
+            <CountryChart data={audience?.countries || []} />
+            <DeviceChart data={audience?.devices || []} />
+            <BrowserList data={(audience?.browsers || []).map(b => ({ browser: b.name, pct: b.value }))} />
           </div>
 
           {/* ── Bottom row ── */}
@@ -581,7 +565,6 @@ export default function SiteOverview() {
             {stats.topReferrers?.length > 0 && (
               <ListPanel title="Top Referrers" rows={stats.topReferrers} labelKey="referrer" valueKey="count" />
             )}
-            <SourcesTable data={MOCK_SOURCES} />
           </div>
         </>
       )}

@@ -243,6 +243,106 @@ router.post('/collect', async (req, res) => {
   }
 });
 
+// ── POST /collect/identify ────────────────────────────────────────────────────
+router.post('/collect/identify', async (req, res) => {
+  res.sendStatus(204);
+  try {
+    const { k: apiKey, userId, traits = {} } = req.body;
+    if (!apiKey || !userId) return;
+    const site = await getSite(apiKey);
+    if (!site) return;
+    const userHash = hashUser(req.ip, req.headers['user-agent'] || '');
+    await db.supabase.from('users_identified').upsert({
+      site_id: site.id, user_hash: userHash, user_id: userId,
+      traits, updated_at: new Date().toISOString(),
+    }, { onConflict: 'site_id,user_hash' });
+  } catch (e) { console.error('[identify]', e.message); }
+});
+
+// ── POST /collect/ecommerce ───────────────────────────────────────────────────
+// Browser-side: window.tf.ecommerce(name, { value, currency, items })
+router.post('/collect/ecommerce', async (req, res) => {
+  res.sendStatus(204);
+  try {
+    const { k: apiKey, event, value, currency = 'USD', items = [], sid } = req.body;
+    if (!apiKey || !event) return;
+    const site = await getSite(apiKey);
+    if (!site) return;
+    const userHash = hashUser(req.ip, req.headers['user-agent'] || '');
+    await db.supabase.from('ecommerce_events').insert({
+      site_id:    site.id,
+      session_id: sid || null,
+      user_hash:  userHash,
+      event,
+      value:      parseFloat(value) || null,
+      currency:   currency.toUpperCase().slice(0, 3),
+      items:      Array.isArray(items) ? items : [],
+      ts:         Math.floor(Date.now() / 1000),
+    });
+  } catch (e) { console.error('[ecommerce]', e.message); }
+});
+
+// ── POST /mp/collect — server-side event ingestion ───────────────────────────
+// Usage: POST /mp/collect  { api_key, events: [{ type, url, ts, data }] }
+// No bot check, no domain guard — trusted server calls
+router.post('/mp/collect', async (req, res) => {
+  const { api_key: apiKey, events: eventsRaw } = req.body;
+  if (!apiKey) return res.status(400).json({ error: 'api_key required' });
+
+  const site = await getSite(apiKey);
+  if (!site) return res.status(401).json({ error: 'Invalid api_key' });
+
+  const events = Array.isArray(eventsRaw) ? eventsRaw : [eventsRaw];
+  const eventRows = [];
+  const ecomRows  = [];
+  const ECOM      = new Set(['purchase','add_to_cart','view_item','begin_checkout','refund','remove_from_cart']);
+
+  for (const evt of events.slice(0, 200)) {
+    if (!evt?.type) continue;
+    const tsSeconds = Math.floor((evt.ts || Date.now()) / 1000);
+    const client_id = require('crypto')
+      .createHash('sha256')
+      .update(`${site.id}:mp:${evt.type}:${tsSeconds}:${evt.url||''}:${require('crypto').randomBytes(4).toString('hex')}`)
+      .digest('hex').slice(0, 32);
+
+    eventRows.push({
+      site_id:    site.id,
+      client_id,
+      session_id: evt.session_id || null,
+      user_hash:  evt.user_hash  || null,
+      type:       evt.type,
+      url:        evt.url        || null,
+      ts:         tsSeconds,
+      source:     evt.source     || 'server',
+      medium:     evt.medium     || 'server',
+      campaign:   evt.campaign   || '',
+      payload:    evt.data       || {},
+    });
+
+    if (ECOM.has(evt.type)) {
+      const d = evt.data || {};
+      ecomRows.push({
+        site_id:    site.id,
+        session_id: evt.session_id || null,
+        user_hash:  evt.user_hash  || null,
+        event:      evt.type,
+        value:      parseFloat(d.value || d.revenue || 0) || null,
+        currency:   (d.currency || 'USD').toUpperCase().slice(0, 3),
+        items:      Array.isArray(d.items) ? d.items : [],
+        ts:         tsSeconds,
+      });
+    }
+  }
+
+  const inserts = [db.supabase.from('events').insert(eventRows)];
+  if (ecomRows.length) inserts.push(db.supabase.from('ecommerce_events').insert(ecomRows));
+  const results = await Promise.all(inserts);
+  const errs = results.filter(r => r.error).map(r => r.error.message);
+  if (errs.length) return res.status(500).json({ error: errs.join('; ') });
+
+  res.json({ ok: true, inserted: eventRows.length, ecommerce: ecomRows.length });
+});
+
 // ── Script generator ──────────────────────────────────────────────────────────
 function generateScript(apiKey, collectUrl, config) {
   return `/* TrackFlow v2 */
@@ -283,6 +383,16 @@ function generateScript(apiKey, collectUrl, config) {
   ${config.hesitation!==false?`var ht={};document.addEventListener('mouseover',function(e){var el=e.target;clearTimeout(ht[el]);ht[el]=setTimeout(function(){track('hesitation',{tag:el.tagName,id:el.id,text:(el.innerText||'').slice(0,50)});},3000);});document.addEventListener('mouseout',function(e){clearTimeout(ht[e.target]);});`:``}
   ${config.formTracking!==false?`document.addEventListener('submit',function(e){var f=e.target;track('form_submit',{id:f.id,action:f.action});});`:``}
   window.tf=track;
+  window.tf.identify=function(userId,traits){
+    if(!userId)return;
+    fetch('${collectUrl}/identify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({k:'${apiKey}',userId:userId,traits:traits||{}}),mode:'cors',keepalive:true});
+  };
+  window.tf.ecommerce=function(eventName,data){
+    if(!hasConsent())return;
+    var payload={k:'${apiKey}',event:eventName,sid:sid,value:data.value||data.revenue||0,currency:data.currency||'USD',items:data.items||[]};
+    fetch('${collectUrl}/ecommerce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),mode:'cors',keepalive:true});
+    track(eventName,data);
+  };
   ${config.customLayer!==false?`var dl=window.dataLayer=window.dataLayer||[];var _dp=dl.push.bind(dl);dl.push=function(o){_dp(o);if(o&&o.event)track('custom',o);};`:``}
 })();`;
 }

@@ -4,6 +4,10 @@ import { AuthProvider, useAuth } from './hooks/useAuth.jsx';
 import AuthPage from './pages/AuthPage.jsx';
 import DashboardLayout from './pages/DashboardLayout.jsx';
 import SitesList from './pages/SitesList.jsx';
+import SiteUsers from './pages/SiteUsers.jsx';
+import SiteEcommerce from './pages/SiteEcommerce.jsx';
+import SiteSegments from './pages/SiteSegments.jsx';
+
 import SiteOverview from './pages/SiteOverview.jsx';
 import SiteGenerator from './pages/SiteGenerator.jsx';
 import SiteHeatmap from './pages/SiteHeatmap.jsx';
@@ -33,6 +37,10 @@ export default function App() {
             <Route path="sites/:id" element={<SiteOverview />} />
             <Route path="/sites/:id/scroll" element={<SiteScroll />} />
             <Route path="/sites/:id/funnels" element={<SiteFunnels />} />
+           <Route path="/sites/:id/users" element={<SiteUsers />} />
+<Route path="/sites/:id/ecommerce" element={<SiteEcommerce />} />
+<Route path="/sites/:id/segments" element={<SiteSegments />} />
+
             <Route path="/sites/:id/retention" element={<SiteRetention />} />
             <Route path="/sites/:id/debugger" element={<SiteDebugger />} />
             <Route path="/sites/:id/flow" element={<SiteFlow />} />

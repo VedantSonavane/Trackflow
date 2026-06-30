@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
+const { resolveSegmentSessionIds } = require('../segments');
 
 async function siteGuard(req, res) {
   const { data: site, error } = await db.supabase
@@ -9,9 +10,45 @@ async function siteGuard(req, res) {
   return site;
 }
 
+// ── Segments CRUD ──────────────────────────────────────────────────────────
+router.get('/:siteId/segments', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const { data, error } = await db.supabase.from('segments').select('*').eq('site_id', site.id).order('created_at', { ascending: false });
+  if (error) return res.status(500).json({ error: 'Database error' });
+  res.json(data || []);
+});
+
+router.post('/:siteId/segments', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const { name, filters } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const { data, error } = await db.supabase.from('segments').insert({
+    site_id: site.id, name, filters: filters || [],
+  }).select().single();
+  if (error) return res.status(500).json({ error: 'Database error' });
+  res.json(data);
+});
+
+router.delete('/:siteId/segments/:segmentId', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  await db.supabase.from('segments').delete().eq('id', req.params.segmentId).eq('site_id', site.id);
+  res.json({ ok: true });
+});
+
+// Resolve ?segment=id query param into a Set of session_ids (or null if none/invalid)
+async function getSegmentScope(req, site) {
+  const segmentId = req.query.segment;
+  if (!segmentId) return null;
+  const { data: segment } = await db.supabase.from('segments').select('*').eq('id', segmentId).eq('site_id', site.id).maybeSingle();
+  if (!segment) return null;
+  const ids = await resolveSegmentSessionIds(db, site, segment);
+  return ids ? new Set(ids) : null;
+}
+
 // ── Overview ─────────────────────────────────────────────────────────────────
 router.get('/:siteId/overview', auth, async (req, res) => {
   const site = await siteGuard(req, res); if (!site) return;
+  const segmentScope = await getSegmentScope(req, site);
   const { from = Date.now() / 1000 - 86400 * 7, to = Date.now() / 1000 } = req.query;
   const fromTs = Math.floor(parseFloat(from));
   const toTs = Math.floor(parseFloat(to));
@@ -23,7 +60,7 @@ router.get('/:siteId/overview', auth, async (req, res) => {
 
   let pageviews, sessions, clicks, rageClicks, errors, byDay;
 
-  if (rollup && rollup.length > 0) {
+  if (rollup && rollup.length > 0 && !segmentScope) {
     pageviews = rollup.reduce((s, r) => s + (r.pageviews || 0), 0);
     sessions = rollup.reduce((s, r) => s + (r.sessions || 0), 0);
     clicks = rollup.reduce((s, r) => s + (r.clicks || 0), 0);
@@ -33,7 +70,7 @@ router.get('/:siteId/overview', auth, async (req, res) => {
   } else {
     const { data: events } = await db.supabase
       .from('events').select('type, session_id, payload, ts').eq('site_id', site.id).gte('ts', fromTs).lte('ts', toTs);
-    const evts = events || [];
+    const evts = (events || []).filter(e => !segmentScope || segmentScope.has(e.session_id));
     pageviews = evts.filter(e => e.type === 'pageview').length;
     sessions = new Set(evts.map(e => e.session_id).filter(Boolean)).size;
     clicks = evts.filter(e => e.type === 'click').length;
@@ -414,6 +451,170 @@ router.get('/:siteId/insights', auth, async (req, res) => {
   }
 
   res.json({ insights });
+});
+
+// ── Audience (real data) ──────────────────────────────────────────────────────
+router.get('/:siteId/audience', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const { from = Date.now()/1000 - 86400*7, to = Date.now()/1000 } = req.query;
+  const fromTs = Math.floor(parseFloat(from));
+  const toTs   = Math.floor(parseFloat(to));
+
+  const { data: rows } = await db.supabase
+    .from('sessions').select('device_type,browser,country')
+    .eq('site_id', site.id).gte('started_at', fromTs).lte('started_at', toTs);
+
+  const count = (arr, key) => {
+    const m = {};
+    (arr||[]).forEach(r => { const v = r[key]||'Other'; m[v]=(m[v]||0)+1; });
+    const total = Object.values(m).reduce((a,b)=>a+b,0)||1;
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([name,n])=>({ name, value: Math.round(n/total*100) }));
+  };
+
+  const countryCount = (arr) => {
+    const m = {};
+    (arr||[]).forEach(r => { const v=r.country||'Unknown'; m[v]=(m[v]||0)+1; });
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([country,sessions])=>({ country, sessions }));
+  };
+
+  res.json({ devices: count(rows,'device_type'), browsers: count(rows,'browser'), countries: countryCount(rows) });
+});
+
+// ── Users list ────────────────────────────────────────────────────────────────
+router.get('/:siteId/users', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const segmentScope = await getSegmentScope(req, site);
+  const { limit=50, offset=0 } = req.query;
+
+  const { data: anon } = await db.supabase
+    .from('users_anonymous').select('user_hash,first_seen,last_seen')
+    .eq('site_id', site.id).order('last_seen',{ ascending:false })
+    .range(parseInt(offset), parseInt(offset)+parseInt(limit)-1);
+
+  if (!anon?.length) return res.json([]);
+
+  const hashes = anon.map(u=>u.user_hash);
+  const { data: identified } = await db.supabase
+    .from('users_identified').select('user_hash,user_id,traits')
+    .eq('site_id', site.id).in('user_hash', hashes);
+
+  let sessionsQ = db.supabase.from('sessions').select('user_hash,id').eq('site_id', site.id).in('user_hash', hashes);
+  const { data: sessionCounts } = await sessionsQ;
+  const scopedSessions = segmentScope ? (sessionCounts || []).filter(s => segmentScope.has(s.id)) : (sessionCounts || []);
+
+  const idMap = Object.fromEntries((identified||[]).map(u=>[u.user_hash,u]));
+  const sessMap = {};
+  scopedSessions.forEach(s=>{ sessMap[s.user_hash]=(sessMap[s.user_hash]||0)+1; });
+
+  let result = anon.map(u=>({
+    user_hash:  u.user_hash,
+    user_id:    idMap[u.user_hash]?.user_id || null,
+    traits:     idMap[u.user_hash]?.traits  || {},
+    first_seen: u.first_seen,
+    last_seen:  u.last_seen,
+    sessions:   sessMap[u.user_hash] || 0,
+  }));
+  if (segmentScope) result = result.filter(u => u.sessions > 0);
+  res.json(result);
+});
+
+// ── User timeline ─────────────────────────────────────────────────────────────
+router.get('/:siteId/users/:hash', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const hash = req.params.hash;
+
+  const [{ data: profile }, { data: events }, { data: sessions }] = await Promise.all([
+    db.supabase.from('users_identified').select('*').eq('site_id',site.id).eq('user_hash',hash).maybeSingle(),
+    db.supabase.from('events').select('type,url,ts,payload').eq('site_id',site.id).eq('user_hash',hash).order('ts',{ascending:false}).limit(100),
+    db.supabase.from('sessions').select('id,started_at,ended_at,duration_s,page_count,entry_url,device_type,browser,country').eq('site_id',site.id).eq('user_hash',hash).order('started_at',{ascending:false}).limit(20),
+  ]);
+
+  res.json({ profile: profile||null, events: events||[], sessions: sessions||[] });
+});
+
+// ── Ecommerce ─────────────────────────────────────────────────────────────────
+router.get('/:siteId/ecommerce', auth, async (req, res) => {
+  const site = await siteGuard(req, res); if (!site) return;
+  const segmentScope = await getSegmentScope(req, site);
+  const { from = Date.now() / 1000 - 86400 * 7, to = Date.now() / 1000 } = req.query;
+  const fromTs = Math.floor(parseFloat(from));
+  const toTs   = Math.floor(parseFloat(to));
+
+  const { data: rowsRaw, error } = await db.supabase
+    .from('ecommerce_events')
+    .select('event, value, currency, items, ts, session_id, user_hash')
+    .eq('site_id', site.id)
+    .gte('ts', fromTs)
+    .lte('ts', toTs)
+    .order('ts', { ascending: true });
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+  const evts = segmentScope ? (rowsRaw || []).filter(e => segmentScope.has(e.session_id)) : (rowsRaw || []);
+
+  const purchases   = evts.filter(e => e.event === 'purchase');
+  const revenue     = purchases.reduce((s, e) => s + parseFloat(e.value || 0), 0);
+  const orders      = purchases.length;
+  const aov         = orders > 0 ? revenue / orders : 0;
+  const addToCart   = evts.filter(e => e.event === 'add_to_cart').length;
+  const checkouts   = evts.filter(e => e.event === 'begin_checkout').length;
+  const refunds     = evts.filter(e => e.event === 'refund').reduce((s,e)=>s+parseFloat(e.value||0),0);
+
+  // Unique buyers
+  const buyers = new Set(purchases.map(e => e.user_hash || e.session_id).filter(Boolean)).size;
+
+  // Revenue by day
+  const byDay = {};
+  purchases.forEach(e => {
+    const day = new Date(e.ts * 1000).toISOString().split('T')[0];
+    byDay[day] = (byDay[day] || 0) + parseFloat(e.value || 0);
+  });
+  const revenueByDay = Object.entries(byDay)
+    .map(([day, rev]) => ({ day, revenue: Math.round(rev * 100) / 100 }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+
+  // Top products — flatten items arrays
+  const productMap = {};
+  evts.forEach(e => {
+    (e.items || []).forEach(item => {
+      const key = item.item_id || item.id || item.name || 'unknown';
+      if (!productMap[key]) productMap[key] = { id: key, name: item.name || key, revenue: 0, quantity: 0 };
+      productMap[key].revenue  += parseFloat(item.price || 0) * parseInt(item.quantity || 1);
+      productMap[key].quantity += parseInt(item.quantity || 1);
+    });
+  });
+  const topProducts = Object.values(productMap)
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 10)
+    .map(p => ({ ...p, revenue: Math.round(p.revenue * 100) / 100 }));
+
+  // Checkout funnel
+  const { data: sessionEvts } = await db.supabase
+    .from('events').select('session_id, type')
+    .eq('site_id', site.id)
+    .in('type', ['pageview', 'begin_checkout', 'purchase'])
+    .gte('ts', fromTs).lte('ts', toTs);
+
+  const allSessions = new Set((sessionEvts||[]).map(e=>e.session_id).filter(Boolean)).size;
+  const checkoutFunnel = [
+    { label: 'All sessions',    count: allSessions },
+    { label: 'Add to cart',     count: addToCart },
+    { label: 'Begin checkout',  count: checkouts },
+    { label: 'Purchase',        count: orders },
+  ];
+
+  res.json({
+    revenue:       Math.round(revenue * 100) / 100,
+    orders,
+    aov:           Math.round(aov * 100) / 100,
+    buyers,
+    addToCart,
+    checkouts,
+    refunds:       Math.round(refunds * 100) / 100,
+    conversionRate: allSessions > 0 ? Math.round(orders / allSessions * 1000) / 10 : 0,
+    revenueByDay,
+    topProducts,
+    checkoutFunnel,
+  });
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
